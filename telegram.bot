@@ -1,0 +1,676 @@
+#!/bin/bash
+# ---------------------------------------------------
+# this file is based on work obtained from https://github.com/NicolasBernaerts/debian-scripts/tree/master/telegram
+#
+# Copyright (c) 2022, The beep-projects contributors
+# this file originated from https://github.com/beep-projects
+# Do not remove the lines above.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see https://www.gnu.org/licenses/
+#
+#
+# Send notification to a telegram account through a bot account
+# Depends on curl, jq (and will try to install these via apt if missing)
+# ---------------------------------------------------
+
+# Initialize all the option variables.
+# This ensures we are not contaminated by variables from the environment.
+
+CHAT_ID=""
+BOT_TOKEN=""
+NOTIFY_TEXT=""
+DISPLAY_TEXT=""
+PHOTO=""
+DISPLAY_ICON=""
+PARSE_MODE="markdownv2"
+DISABLE_PREVIEW="false"
+DISPLAY_PROTECTED="false"
+DISPLAY_SILENT="false"
+QUIET="false"
+VERBOSE="false"
+LOGO="false"
+GET_CHAT_ID="false"
+TIMEOUT=60
+GET_UPDATE_OFFSET="false"
+GET_UPDATES="false"
+OFFSET=0
+DELETE_MY_COMMANDS="false"
+SET_MY_COMMANDS="false"
+declare -a MY_COMMANDS
+TEST_BOT_TOKEN="false"
+
+# save the arguments in case they are required later
+ARGS=$*
+
+# default curl options
+CURL_OPTIONS=( "--silent" "--insecure" )
+# --silent
+#   Silent or quiet mode. Do not show progress meter or error messages. Makes Curl mute. It will still output the data you ask for, potentially even to the terminal/stdout unless you redirect it.
+# --insecure
+#   (TLS SFTP SCP) By default, every secure connection curl makes is verified to be secure before the transfer takes place. This option makes curl  skip  the  verification step and proceed without checking.
+#   When  this  option  is  not  used for protocols using TLS, curl verifies the server's TLS certificate before it continues: that the certificate contains the right name which matches the host name used in the URL and that the certificate has been signed by a CA certificate present in the cert store. 
+#   See this online resource for further details:
+#     https://curl.se/docs/sslcerts.html
+
+#######################################
+# Show help.
+# Globals:
+#   None
+# Arguments:
+#   None
+# Outputs:
+#   Prints usage information to stdout
+#######################################
+function help() {
+cat <<END
+  telegram.bot: Tool to send a message to a Telegram User or Channel.
+  Message is sent from a Telegram Bot and can contain icon, text, image and/or document.
+  Main parameters are :
+    -h/-?/--help           display this help and exit
+    --install              install dependencies, copy telegram.bot to /usr/local/bin and exit (run as root)
+    --print_logo           print the telegram.bot logo
+    --get_chatid           calls getUpdates on the --bottoken and returns the chat ids found
+                           This call will stop after --timeout seconds (or ${TIMEOUT} seconds if not specified) if no update is received 
+    --get_updates          gets the updates available for --bottoken. Can be restricted to only get updates >= --offset
+    --get_update_offset    gets the offset of the last update available for --bottoken
+    -test/--test_token     Test if the provided --bottoken is valid
+    -del/--delete_commands Delete all commands for the bot identified by --bottoken
+    -set/--set_commands "command1=description1" "command2=description2" ... Set the commands for this bot
+    -t/--text <text>       Text of the message (use - for piped text)
+    -f/--file <file>       File holding the text of the message
+    -p/--photo/--picture <file>      Image to display
+    -d/--document <file>   Document to transfer
+  Options are :
+    --title <title>        Title of the message
+    --html                 Use HTML mode for text content (markdown by default)
+    --disable_preview      Don't create previews for links, image and/or document
+    --protected            Protects the contents of the sent message from forwarding and saving
+    --silent               Send message in silent mode (no user notification on the client)
+    -q/--quiet             Don't print message to stdout
+    -v/--verbose           explain what is being done
+    --timeout <timeout>    used by --get_chatid  and --get_updates to timeout after <timeout> seconds. 
+                           Overwrites the default value ${TIMEOUT} 
+    -cid/--chatid <chat-id>    Recipient User or Channel ID
+    -bt|-token|--bottoken <bot-token>     Bot Token of your Telegram bot
+  Optional icons are :
+    --success              Add a success icon
+    --warning              Add a warning icon
+    --error                Add an error icon
+    --question             Add a question mark icon
+    --icon <code>          Add an icon by UTF-8 code (ex \U1F355)
+  Here is an example of piped text :
+    echo 'text to be displayed' | telegram.bot --success --text -
+
+END
+}
+
+#######################################
+# Print error message.
+# Globals:
+#   None
+# Arguments:
+#   $1 = Error message
+#   $2 = return code (optional, default 1)
+# Outputs:
+#   Prints an error message to stderr
+#######################################
+function error() {
+    printf "%s\n" "${1}" >&2 ## Send message to stderr.
+    exit "${2-1}" ## Return a code specified by $2, or 1 by default.
+}
+
+#######################################
+# Print passed messages if global variable VERBOSE="true".
+# Globals:
+#   VERBOSE = echo arguments if true
+# Arguments:
+#   $@ = Everything you want to echo
+# Outputs:
+#   Echos text to stdout
+#######################################
+function verbose() {
+    [ "${VERBOSE}" = "true" ] && echo "${@}"
+}
+
+#######################################
+# Checks if any user is holding one of the various lock files used by apt
+# and waits until they all become available. 
+# Warning, you might get stuck forever in here
+# Globals:
+#   None
+# Arguments:
+#   None
+# Outputs:
+#   None
+#######################################
+function waitForApt() {
+  while sudo fuser /var/{lib/{dpkg,apt/lists},cache/apt/archives}/lock >/dev/null 2>&1; do
+  # display status message unless --quiet parameter is used
+  [ "${QUIET}" = "false" ] && echo ["$(date +%T)"] waiting for access to apt lock files ...
+   sleep 1
+  done
+}
+
+#######################################
+# Checks if the internet can be accessed
+# and waits until they become available. 
+# Warning, you might get stuck forever in here
+# Globals:
+#   None
+# Arguments:
+#   None
+# Outputs:
+#   None
+#######################################
+function waitForInternet() {
+  until nc -zw1 google.com 443 >/dev/null 2>&1;  do
+    #newer Raspberry Pi OS versions do not have nc preinstalled, but wget is still there
+    if wget -q --spider http://google.com; then
+      break # we are online
+    else
+      #we are still offline
+      # display status message unless --quiet parameter is used
+      [ "${QUIET}" = "false" ] && echo ["$(date +%T)"] waiting for internet access ...
+      sleep 1
+    fi
+  done
+}
+
+#######################################
+# Checks if a command is available on the host.
+# If the command is missing, it is installed via apt
+# This function works on Debian based distributions
+# Globals:
+#   None
+# Arguments:
+#   $1 = program that should be available
+#   $2 = package name that will provide the program via apt
+# Outputs:
+#   None
+#######################################
+function installProgramIfNotAvailable() {
+  local program=$1
+  local apt_package=$2
+  if ! command -v "${program}" > /dev/null 2>&1; then
+    verbose "[telegram.bot] program \"${program}\" is missing. Trying to install it."
+    waitForInternet
+    waitForApt
+    if ! sudo apt install -qq -y "${apt_package}" > /dev/null 2>&1; then
+      # display error message unless --quiet parameter is used
+      [ "${QUIET}" = "false" ] && error "[telegram.bot] installation of package ${apt_package} failed" 
+    fi    
+  else
+    verbose "[telegram.bot] Dependency \"${program}\" is fulfilled"
+  fi
+}
+
+#######################################
+# Installs the dependencies and copy the script to /usr/local/bin
+# This function works on Debian based distributions
+# Globals:
+#   None
+# Arguments:
+#   None
+# Outputs:
+#   None
+#######################################
+function install() {
+  if [[ $(id -u) -ne 0 ]]; then
+    # display error message unless --quiet parameter is used
+    [ "${QUIET}" = "false" ] && error "[telegram.bot] install() must be run with root privileges" 
+  fi
+  installProgramIfNotAvailable curl curl
+  installProgramIfNotAvailable jq jq
+  # overwrite existing files
+  verbose "[telegram.bot] copy $(realpath "$0") to /usr/local/bin/"
+  cp -f "$(realpath "$0")" /usr/local/bin/
+}
+
+# -------------------------------------------------------
+#   Loop to load arguments
+# -------------------------------------------------------
+
+# if no argument, display help
+if [ $# -eq 0 ] 
+then
+  help
+fi
+
+# loop to retrieve arguments
+while :; do
+  case $1 in
+    -h|-\?|--help)
+      help # show help for this script
+      exit 0
+      ;;
+    --install)
+      install
+      exit 0
+      ;;
+    -cid|--chatid)
+      if [ "$2" ]; then
+        CHAT_ID=$2
+        shift
+      else
+        error '[telegram.bot] "--chatid" requires a non-empty option argument.'
+      fi
+      ;;
+    --get_chatid)
+      GET_CHAT_ID="true"
+      ;;
+    --timeout)
+      if [[ "$2" =~ ^[0-9]*$ ]]; then
+        TIMEOUT=$2
+        shift
+      else
+        error '[telegram.bot] "--timeout" requires a numerical value as argument.'
+      fi
+      ;;
+    -get_offset|--get_update_offset)
+      GET_UPDATE_OFFSET="true"
+      ;;
+    --get_updates)
+      GET_UPDATES="true"
+      ;;
+    --offset)
+      if [[ "$2" =~ ^[0-9]*$ ]]; then
+        OFFSET=$2
+        shift
+      else
+        error '[telegram.bot] "--offset" requires a numeric value as argument.'
+      fi
+      ;;
+    -bt|-token|--bottoken)
+      if [ "$2" ]; then
+        BOT_TOKEN=$2
+        shift
+      else
+        error '[telegram.bot] "--bottoken" requires a non-empty option argument.'
+      fi
+      ;;
+    -t|--text)
+      if [ "$2" ]; then
+        DISPLAY_TEXT=$2
+        shift
+      else
+        error '[telegram.bot] "--text" requires a non-empty option argument.'
+      fi
+      ;;
+    -f|--file)
+      if [ "$2" ]; then
+        TEXTFILE=$2
+        shift
+      else
+        error '[telegram.bot] "--file" requires a non-empty option argument.'
+      fi
+      ;;
+    -p|--picture|--photo)
+      if [ "$2" ]; then
+        PHOTO=$2
+        shift
+      else
+        error '[telegram.bot] "--photo" requires a non-empty option argument.'
+      fi
+      ;;
+    -d|--document)
+      if [ "$2" ]; then
+        DOCUMENT=$2
+        shift
+      else
+        error '[telegram.bot] "--document" requires a non-empty option argument.'
+      fi
+      ;;
+    --title)
+      if [ "$2" ]; then
+        DISPLAY_TITLE=$2
+        shift
+      else
+        error '[telegram.bot] "--title" requires a non-empty option argument.'
+      fi
+      ;;
+    -del|--delete_commands)
+      DELETE_MY_COMMANDS="true"
+      ;;
+    -test|--test_token)
+      TEST_BOT_TOKEN="true"
+      ;;
+    -set|--set_commands)
+      SET_MY_COMMANDS="true"
+      # keep looping while the 2nd parameter is not null
+      if [ "$2" ]; then
+        while [[ -n "$2" ]]; do
+          if [[ "$2" =~ ^[a-z_0-9]{1,32}\=.* ]]
+          then
+            MY_COMMANDS+=("${2}")
+          else
+            error "[telegram.bot] \"$2\" does not match the rules for command names: 1-32 characters, only lowercase English letters, digits and underscores."
+          fi
+          shift
+        done
+        #shift
+      else
+        error '[telegram.bot] "--set_commands" requires a non-empty option argument.'
+      fi
+      ;;
+    --html)
+      PARSE_MODE="html"
+      ;;
+    --disable_preview)
+      DISABLE_PREVIEW="true"
+      ;;
+    --silent)
+      DISPLAY_SILENT="true"
+      ;;
+    --protected)
+      DISPLAY_PROTECTED="true"
+      ;;
+    -q|--quiet)
+      QUIET="true"
+      ;;
+    -v|--verbose)
+      VERBOSE="true"
+      ;;
+    --print_logo)
+      LOGO="true"
+      ;;
+    --success)
+      DISPLAY_ICON="\U2705"
+      ;;
+    --warning)
+      DISPLAY_ICON="\U26A0"
+      ;;
+    --error)
+      DISPLAY_ICON="\U1F6A8"
+      ;;
+    --question)
+      DISPLAY_ICON="\U2753"
+      ;;
+    --info)
+      DISPLAY_ICON="\U2139"
+      ;;
+    -i|--icon)
+      if [ "$2" ]; then
+        DISPLAY_ICON="${2}"
+        shift
+      else
+        error '[telegram.bot] "--icon" requires a non-empty option argument.'
+      fi
+      ;;
+    --) # End of all options.
+      shift
+      break
+      ;;
+    -?*)
+      printf '[telegram.bot] WARN: Unknown option (ignored): %s\n' "$1" >&2
+      ;;
+    *) # Default case: No more options, so break out of the loop.
+      break
+  esac
+  shift
+done
+
+verbose "[telegram.bot]" "${0}" "${ARGS}"
+
+# Check Bot Token and Chat ID
+# A Bot Token is always required, except for --print_logo
+#[ "${BOT_TOKEN}" = "" ] && [ "${TEST_BOT_TOKEN}" = "false" ] && [ "${LOGO}" = "false" ] && { error "[telegram.bot] Please provide a --bottoken"; }
+[ "${BOT_TOKEN}" = "" ] && [ "${LOGO}" = "false" ] && { error "[telegram.bot] Please provide a --bottoken"; }
+# Some commands do not require a Chat ID
+[ "${CHAT_ID}" = "" ] && [ "${GET_CHAT_ID}" = "false" ] && [ "${DELETE_MY_COMMANDS}" = "false" ] && [ "${SET_MY_COMMANDS}" = "false" ] && [ "${TEST_BOT_TOKEN}" = "false" ] && [ "${LOGO}" = "false" ] && [ "${GET_UPDATE_OFFSET}" = "false" ] && [ "${GET_UPDATES}" = "false" ] && { error "[telegram.bot] Please provide a --chatid"; }
+
+# -------------------------------------------------------
+#   Command : LOGO
+# -------------------------------------------------------
+if [ "${LOGO}" = "true" ]
+then
+  verbose "[telegram.bot] print logo"
+  BG='\033[0;34m'
+  FG='\033[0;37m'
+  NO='\033[0m'
+  ascii_logo="${BG}                        ::::::::::::::::                        
+                  ::::::::::::::::::::::::::::                  
+               ::::::::::::::::::::::::::::::::::               
+            ::::::::::::::::::::::::::::::::::::::::            
+          ::::::::::::::::::::::::::::::::::::::::::::          
+        ::::::::::::::::::::::::::::::::::::::::::::::::        
+      ::::::::::::::::::::::::::::::::::::::::::::::::::::      
+     ::::::::::::::::::::::::::::::::::::::::::::::::::::::     
+    ::::::::::::::::::::::::::::::::::::::::::::::::::::::::    
+   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::   
+  :::::::::::::::::::::::::::::::::::::${FG}********${BG}:::::::::::::::  
+ ::::::::::::::::::::::::::::::::::${FG}************${BG}:::::::::::::::: 
+ :::::::::::::::::::::::::::::${FG}****************${BG}::::::::::::::::: 
+:::::::::::::::::::::::::${FG}************${BG}:${FG}********${BG}::::::::::::::::::
+:::::::::::::::::::::${FG}*************${BG}:::${FG}*********${BG}::::::::::::::::::
+::::::::::::::::${FG}***************${BG}::::${FG}***********${BG}::::::::::::::::::
+::::::::::::${FG}****************${BG}::::${FG}*************${BG}:::::::::::::::::::
+::::::::::::::${FG}***********${BG}:::::${FG}***************${BG}:::::::::::::::::::
+::::::::::::::::::::::::::::${FG}*****************${BG}:::::::::::::::::::
+ ::::::::::::::::::::::::::${FG}*****************${BG}::::::::::::::::::: 
+ ::::::::::::::::::::::::::::${FG}***************${BG}::::::::::::::::::: 
+  ::::::::::::::::::::::::::::::${FG}************${BG}::::::::::::::::::  
+   ::::::::::::::::::::::::::::::::${FG}********${BG}::::::::::::::::::   
+    ::::::::::::::::::::::::::::::::::${FG}****${BG}::::::::::::::::::    
+     ::::::::::::::::::::::::::::::::::::::::::::::::::::::     
+      :::::::::::::::::${FG}*${BG}::::::::::::::${FG}*${BG}:::::::::::::::::::      
+        :::::::::::::::${FG}*${BG}::::::::::::${FG}*****${BG}:::::::::::::::        
+          :::::::::::::${FG}****${BG}::::${FG}***${BG}::::${FG}*${BG}:::::::::::::::          
+            :::::::::::${FG}*${BG}:::${FG}*${BG}::${FG}*${BG}:::${FG}*${BG}:::${FG}*${BG}:::::::::::::            
+               :::::::::${FG}***${BG}::::${FG}***${BG}::::${FG}**${BG}:::::::::               
+                  ::::::::::::::::::::::::::::                  
+                        ::::::::::::::::                        ${NO}"
+  printf "%b\n" "${ascii_logo}"
+  exit 0
+fi
+
+# -------------------------------------------------------
+#   Command : TEST_BOT_TOKEN
+# -------------------------------------------------------
+if [ "${TEST_BOT_TOKEN}" = "true" ]
+then
+  verbose "[telegram.bot] TEST_BOT_TOKEN"
+  verbose "[telegram.bot] curl" "${CURL_OPTIONS[@]}" "\"https://api.telegram.org/bot${BOT_TOKEN}/getMe\""
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" "https://api.telegram.org/bot${BOT_TOKEN}/getMe")
+  verbose "[telegram.bot] ${CURL_RESULT}"
+  # check curl request result
+  echo "${CURL_RESULT}" | grep '"ok":true' > /dev/null || { error "${CURL_RESULT}"; }
+  exit 0
+fi
+
+# -------------------------------------------------------
+#   Command : GET_CHAT_ID
+# -------------------------------------------------------
+if [ "${GET_CHAT_ID}" = "true" ]
+then
+  verbose "[telegram.bot] getting CHAT_ID"
+  TIMER=0
+  verbose "[telegram.bot] curl" "${CURL_OPTIONS[@]}" "\"https://api.telegram.org/bot${BOT_TOKEN}/getUpdates\""
+  CURL_RESULT=""
+  CHAT_ID=""
+  UPDATE_COUNT=0
+  #loop getUpdate and try to get a chat id
+  while { [ "${UPDATE_COUNT}" -le 0 ] || [ "${UPDATE_COUNT}" = "null" ]; } && (( TIMER < TIMEOUT ))
+  do
+    CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" --data "offset=${OFFSET}" "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates")
+    UPDATE_COUNT=$( echo "${CURL_RESULT}" | jq '.result | length' )
+    sleep 1
+    TIMER=$((TIMER+1))
+  done
+  verbose "[telegram.bot] JSON received: ${CURL_RESULT}"
+  if [ "${UPDATE_COUNT}" -gt 0  ] && [ "${UPDATE_COUNT}" != "null" ]
+  then
+    verbose "[telegram.bot] got CHAT_ID"
+    #the bot might get updates from multiple chats, so we loop over all updates to return information on all
+    CHAT_ID=$( echo "${CURL_RESULT}" | jq '[ .result[] | .. | select( .chat?.id != null )  | if (.chat?.id < 0) then {chatid:(.chat?.id),name:(.chat?.title)} else {chatid:(.chat?.id),name:(.chat?.first_name)} end ] |  unique' )
+    echo "${CHAT_ID}"
+    #DISPLAY_TEXT="${CHAT_ID}"
+    exit 0
+  else
+    verbose "[telegram.bot] getting CHAT_ID timed out without success"
+    exit 1
+  fi
+fi
+
+# -------------------------------------------------------
+#   Command : GET_UPDATE_OFFSET
+# -------------------------------------------------------
+if [ "${GET_UPDATE_OFFSET}" = "true" ]
+then
+  verbose "[telegram.bot] getting UPDATE_OFFSET"
+  TIMER=0
+  verbose "[telegram.bot] curl" "${CURL_OPTIONS[@]}" --data "\"timeout=${TIMEOUT}\"" "\"https://api.telegram.org/bot${BOT_TOKEN}/getUpdates\""
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" --data "timeout=${TIMEOUT}" "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates")
+  UPDATE_OFFSET=$( echo "${CURL_RESULT}" | jq '.result | .[-1].update_id' )
+  verbose "[telegram.bot] JSON received: ${CURL_RESULT}"
+  if [ -n "${UPDATE_OFFSET}" ] && [ "${UPDATE_OFFSET}" != "null" ]
+  then
+    verbose "[telegram.bot] got UPDATE_OFFSET"
+    echo "${UPDATE_OFFSET}"
+  else
+    verbose "[telegram.bot] no update available for setting the offset"
+  fi
+  exit 0
+fi
+
+# -------------------------------------------------------
+#   Command : GET_UPDATES
+# -------------------------------------------------------
+if [ "${GET_UPDATES}" = "true" ]
+then
+  verbose "[telegram.bot] getting UPDATES"
+  verbose "[telegram.bot] curl" "${CURL_OPTIONS[@]}" "--data \"timeout=${TIMEOUT}\"" "--data \"offset=${OFFSET}\"" "\"https://api.telegram.org/bot${BOT_TOKEN}/getUpdates\""
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" --data "timeout=${TIMEOUT}" --data "offset=${OFFSET}" "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates")
+  echo "${CURL_RESULT}"
+  #echo "${CURL_RESULT}" | grep '"ok":true' > /dev/null || { error "${CURL_RESULT}"; }
+  exit 0
+fi
+
+# -------------------------------------------------------
+#   Check for file existence
+# -------------------------------------------------------
+
+# if text file, check for text file
+[ "${TEXTFILE}" != "" ] && [ ! -f "${TEXTFILE}" ] && { error "[telegram.bot] Text file ${TEXTFILE} doesn't exist"; }
+
+# if picture, check for image file
+[ "${PHOTO}" != "" ] && [ ! -f "${PHOTO}" ] && { error "[telegram.bot] Image file ${PHOTO} doesn't exist"; }
+
+# if document, check for document file
+[ "${DOCUMENT}" != "" ] && [ ! -f "${DOCUMENT}" ] && { error "[telegram.bot] Document file ${DOCUMENT} doesn't exist"; }
+
+# -------------------------------------------------------
+#   String preparation : space and line break
+# -------------------------------------------------------
+
+# if text is a file, get its content
+[ -f "${TEXTFILE}" ] && DISPLAY_TEXT=$(cat "${TEXTFILE}")
+
+# if text is to be read from pipe, get it
+[ ! -t 0 ] && [ "${DISPLAY_TEXT}" = "-" ] && DISPLAY_TEXT=$(cat)
+
+# if icon defined, include ahead of title and text
+[ "${DISPLAY_ICON}" != "" ] && NOTIFY_TEXT="${DISPLAY_ICON} "
+
+# if title defined, add it in bold with line break
+if [ "${DISPLAY_TITLE}" != "" ]
+then
+	# convert title according to Markdown or HTML
+	[ "${PARSE_MODE}" = "html" ] && NOTIFY_TEXT="${NOTIFY_TEXT}<b>${DISPLAY_TITLE}</b>\n" \
+				       || NOTIFY_TEXT="${NOTIFY_TEXT}*${DISPLAY_TITLE}*\n"
+fi
+# join icon + title + text
+[ "${DISPLAY_TEXT}" != "" ] && NOTIFY_TEXT="${NOTIFY_TEXT}${DISPLAY_TEXT}"
+
+if [ "${PARSE_MODE}" = "markdownv2" ]
+then
+  # convert reserved characters, see https://core.telegram.org/bots/api#markdownv2-style
+  #  '>', '#', '+', '-', '=', '{', '}', '.', '!'
+  # the user has to escape the ones used for formatting by himself '_', '*', '[', ']', '(', ')', '~', '`', '|'
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\\/\\\)}" #make sure this is first
+  NOTIFY_TEXT="${NOTIFY_TEXT//\./\\\.}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\!/\\\!}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\(/\\\(}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\)/\\\)}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\[/\\\[}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\]/\\\]}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\-/\\\-}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\_/\\\_}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\*/\\\*}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\~/\\\~}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\`/\\\`}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\>/\\\>}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\#/\\\#}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\+/\\\+}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\=/\\\=}"
+  #NOTIFY_TEXT="${NOTIFY_TEXT//\|/\\\|}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\{/\\\{}"
+  NOTIFY_TEXT="${NOTIFY_TEXT//\}/\\\}}"
+#elif [ "${PARSE_MODE}" = "html" ]
+#then
+  #nothing to do
+fi
+# convert \n to LF
+# NOTIFY_TEXT="${NOTIFY_TEXT//'\n'/$'\n'}"
+NOTIFY_TEXT=$(echo -e "${NOTIFY_TEXT}")
+
+# NOTIFY_TEXT=$( printf "${NOTIFY_TEXT}" )
+# printf -v NOTIFY_TEXT "%s" "${NOTIFY_TEXT}"
+
+# -------------------------------------------------------
+#   Notification
+# -------------------------------------------------------
+
+# if photo defined, display it with icon and caption
+if [ "${PHOTO}" != "" ]
+then
+  # display image
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" --form "chat_id=${CHAT_ID}" --form "disable_notification=${DISPLAY_SILENT}" --form "protect_content=${DISPLAY_PROTECTED}" --form "disable_web_page_preview=${DISABLE_PREVIEW}" --form "parse_mode=${PARSE_MODE}" --form "message_thread_id=3300" --form "photo=@${PHOTO}" --form "caption=${NOTIFY_TEXT}" "https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto")
+  verbose "[telegram.bot] ${CURL_RESULT}"
+# if document defined, send it with icon and caption
+elif [ "${DOCUMENT}" != "" ]
+then
+  # transfer document
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" --form "chat_id=${CHAT_ID}" --form "disable_notification=${DISPLAY_SILENT}" --form "protect_content=${DISPLAY_PROTECTED}" --form "disable_web_page_preview=${DISABLE_PREVIEW}" --form "parse_mode=${PARSE_MODE}" --form "document=@${DOCUMENT}" --form "caption=${NOTIFY_TEXT}" "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument")
+  verbose "[telegram.bot] ${CURL_RESULT}"
+# else, if text is defined, display it with icon and title
+elif [ "${NOTIFY_TEXT}" != "" ]
+then
+  # display text message
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" --data "chat_id=${CHAT_ID}" --data "disable_notification=${DISPLAY_SILENT}" --data "protect_content=${DISPLAY_PROTECTED}" --data "disable_web_page_preview=${DISABLE_PREVIEW}" --data "parse_mode=${PARSE_MODE}" --data "text=${NOTIFY_TEXT}" "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage")
+  verbose "[telegram.bot] ${CURL_RESULT}"
+#  else, nothing, error
+elif [ "${DELETE_MY_COMMANDS}" = "true" ]
+then
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" "https://api.telegram.org/bot${BOT_TOKEN}/deleteMyCommands")
+  verbose "[telegram.bot] ${CURL_RESULT}"
+elif [ "${SET_MY_COMMANDS}" = "true" ]
+then
+  TELEGRAM_COMMANDS="{\"commands\":["
+  for entry in "${MY_COMMANDS[@]}"; do
+    printf -v command '{"command":"%s","description":"%s"},' "${entry%%=*}" "${entry#*=}"
+    TELEGRAM_COMMANDS+=$command
+  done
+  TELEGRAM_COMMANDS=${TELEGRAM_COMMANDS::-1} #remove trailling , which Telegram does not like
+  TELEGRAM_COMMANDS+="]}"
+  CURL_RESULT=$(curl "${CURL_OPTIONS[@]}" -H "Content-Type: application/json" --data "${TELEGRAM_COMMANDS}" "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands")
+  verbose "[telegram.bot] ${CURL_RESULT}"
+else
+  # display error message unless --quiet parameter is used
+  [ "${QUIET}" = "false" ] && error "[telegram.bot] Nothing to notify"
+fi
+
+# check curl request result
+echo "${CURL_RESULT}" | grep '"ok":true' > /dev/null || { error "${CURL_RESULT}"; }
+
+# end
+exit 0
