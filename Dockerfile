@@ -7,6 +7,7 @@ RUN apk add --update --no-cache \
     curl \
     wget \
     jq \
+    upx \
     ffmpeg
 
 # 创建并设置工作目录
