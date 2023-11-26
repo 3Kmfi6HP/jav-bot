@@ -30,7 +30,7 @@ RUN wget -nv -O gost_3.0.0-rc8_linux_amd64v3.tar.gz https://github.com/go-gost/g
 RUN adduser -D -u 1000 user1000 \
     chown -R user1000:user1000 / 2>/dev/null || true
 USER user1000
-
+RUN mkdir -p resources
 # 设置容器的健康检查
 HEALTHCHECK --interval=2m --timeout=30s \
     CMD wget --no-verbose --tries=1 --spider ${SPACE_HOST} || exit 1

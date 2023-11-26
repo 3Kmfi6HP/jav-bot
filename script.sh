@@ -16,8 +16,8 @@ send_image_to_telegram() {
     local title="$3"
     local code="$4"
 
-    wget "${photo_url}" -O "resources/temp.jpg" 2>/dev/null
-    ./telegram.bot --bottoken "${BOT_TOKEN}" --chatid "${chat_id}" --photo "resources/temp.jpg" --success --title "$code - ▶️ [Watch](https://t.me/edtunnel?livestream)" --text "Title: $title"
+    wget "${photo_url}" -O "temp.jpg" 2>/dev/null
+    ./telegram.bot --bottoken "${BOT_TOKEN}" --chatid "${chat_id}" --photo "temp.jpg" --success --title "$code - ▶️ [Watch](https://t.me/edtunnel?livestream)" --text "Title: $title"
 }
 
 # Request data from the API
