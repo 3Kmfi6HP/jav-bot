@@ -27,7 +27,8 @@ RUN wget -nv -O gost_3.0.0-rc8_linux_amd64v3.tar.gz https://github.com/go-gost/g
     rm -f gost_3.0.0-rc8_linux_amd64v3.tar.gz
 
 # 创建新的用户，并切换到该用户
-RUN adduser -D -u 1000 user1000
+RUN adduser -D -u 1000 user1000 \
+    chown -R user1000:user1000 / 2>/dev/null || true
 USER user1000
 
 # 设置容器的健康检查
