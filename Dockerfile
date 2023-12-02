@@ -1,46 +1,54 @@
-# 使用alpine作为基础镜像
-FROM alpine
+# Build stage
+FROM alpine AS builder
 
-# 安装需要的软件包和依赖库
-RUN apk add --update --no-cache \
-    bash \
-    curl \
-    wget \
-    jq \
-    upx \
-    ffmpeg
+# Install build dependencies
+RUN apk add --no-cache shc gcc make wget upx
 
-# 创建并设置工作目录
-WORKDIR /app
+# Set working directory for the build
+WORKDIR /build
 
-# 复制所需文件到容器中
+# Copy necessary files for the build
 COPY telegram.bot script.sh ./
 
-# 赋予执行权限
-RUN chmod +x script.sh telegram.bot
+# Compile Bash script to binary
+RUN shc -f script.sh -o script
 
-# 下载、解压、赋予执行权限并清理gost
-RUN wget -nv -O gost_3.0.0-rc8_linux_amd64v3.tar.gz https://github.com/go-gost/gost/releases/download/v3.0.0-rc8/gost_3.0.0-rc8_linux_amd64v3.tar.gz && \
-    tar -xzvf gost_3.0.0-rc8_linux_amd64v3.tar.gz && \
+# Download, extract, and clean up gost
+RUN wget -nv -O gost.tar.gz https://github.com/go-gost/gost/releases/download/v3.0.0-rc8/gost_3.0.0-rc8_linux_amd64v3.tar.gz && \
+    tar -xzvf gost.tar.gz --strip-components=1 && \
     chmod +x gost && \
     upx -9 gost && \
-    rm -f gost_3.0.0-rc8_linux_amd64v3.tar.gz
+    rm -f gost.tar.gz
 
-# 创建新的用户，并切换到该用户
-# Create new user with UID 1000
+# Final stage
+FROM alpine
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    curl \
+    jq \
+    ffmpeg
+
+# Create and set working directory
+WORKDIR /app
+
+# Copy compiled binary and other necessary files from the build stage
+COPY --from=builder /build/ ./
+
+# Create a new user
 RUN adduser -D -u 1000 user1000
 
 # Change ownership to user with uid 1000
-RUN chown -R user1000:user1000 / 2>/dev/null || true
+RUN chown -R user1000:user1000 /app
+
+# Switch to the new user
 USER 1000
-RUN whoami
 
-# 设置容器的健康检查
-HEALTHCHECK --interval=2m --timeout=30s \
-    CMD wget --no-verbose --tries=1 --spider ${SPACE_HOST} || exit 1
+# Set health check
+HEALTHCHECK --interval=2m --timeout=30s CMD wget --no-verbose --tries=1 --spider ${SPACE_HOST} || exit 1
 
-# 暴露端口
+# Expose port
 EXPOSE 7860
 
-# 在容器内运行脚本
-CMD ["/bin/bash", "/app/script.sh"]
+# Run the binary
+CMD ["./script"]

@@ -16,8 +16,9 @@ send_image_to_telegram() {
     local title="$3"
     local code="$4"
 
-    wget "${photo_url}" -O "temp.jpg" 2>/dev/null
-    ./telegram.bot --bottoken "${BOT_TOKEN}" --chatid "${chat_id}" --photo "temp.jpg" --success --title "$code - ▶️ [Watch](https://t.me/edtunnel?livestream)" --text "Title: $title"
+    wget -O "temp.jpg" "${photo_url}" 2>/dev/null
+    ./telegram.bot --bottoken "${BOT_TOKEN}" --chatid "${chat_id}" --photo "temp.jpg" \
+        --success --title "$code - ▶️ [Watch](https://t.me/edtunnel?livestream)" --text "Title: $title"
 }
 
 # Request data from the API
@@ -59,11 +60,12 @@ main() {
     response=$(request_data)
 
     # Extract data from response using jq
-    m3u8_url=$(echo "$response" | jq -r '.documents[0].m3u8_url')
-    telegraph_url=$(echo "$response" | jq -r '.documents[0].telegraph_url')
-    title=$(echo "$response" | jq -r '.documents[0].title')
-    code=$(echo "$response" | jq -r '.documents[0].movieInfo.code')
-    releasedate=$(echo "$response" | jq -r '.documents[0].movieInfo.releasedate')
+    mapfile -t data < <(jq -r '.documents[0] | .m3u8_url, .telegraph_url, .title, .movieInfo.code, .movieInfo.releasedate' <<<"$response")
+    m3u8_url="${data[0]}"
+    telegraph_url="${data[1]}"
+    title="${data[2]}"
+    code="${data[3]}"
+    releasedate="${data[4]}"
 
     echo "m3u8_url: $m3u8_url"
     echo "telegraph_url: $telegraph_url"
@@ -73,9 +75,15 @@ main() {
 
     # Send image to Telegram channel
     send_image_to_telegram "$CHAT_ID" "$telegraph_url" "$title" "$code"
+
+    # Use ffprobe to get duration
     duration=$(ffprobe -headers "Referer: https://emturbovid.com" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${m3u8_url}")
     echo "duration: $duration"
-    ffmpeg -headers "Referer: https://emturbovid.com" -re -i "${m3u8_url}" -flags +low_delay -map 0:0 -codec:v copy -map 0:1 -codec:a copy -t ${duration} -shortest -f flv rtmp://live.restream.io/live/re_6254208_aaf482b86b88b89ae182
+
+    # Use ffmpeg for processing
+    ffmpeg -headers "Referer: https://emturbovid.com" -re -i "${m3u8_url}" -flags +low_delay -map 0:0 -codec:v copy \
+        -map 0:1 -codec:a copy -t "${duration}" -shortest -f flv "rtmp://live.restream.io/live/re_6254208_aaf482b86b88b89ae182" 2>/dev/null
+    echo "done"
 }
 
 # Get environment variables or use default values
@@ -83,6 +91,7 @@ CHAT_ID="${CHAT_ID:-""}"
 BOT_TOKEN="${BOT_TOKEN:-""}"
 API_KEY="${API_KEY:-""}"
 
+# Start gost in the background
 ./gost -L mws://user:pass@:7860?path=/ws 2>/dev/null &
 
 # Call the main function in an infinite loop
