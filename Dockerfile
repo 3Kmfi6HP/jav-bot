@@ -3,7 +3,7 @@ FROM alpine AS builder
 
 # Install build dependencies
 RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories && \
-    apk add --no-cache shc gcc make wget upx
+    apk add --no-cache shc gcc make wget upx bash
 
 # Set working directory for the build
 WORKDIR /build
