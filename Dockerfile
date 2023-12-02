@@ -3,7 +3,7 @@ FROM alpine AS builder
 
 # Install build dependencies
 RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories && \
-    apk add --no-cache shc gcc make wget upx bash musl-dev
+    apk --no-cache add shc gcc make wget upx bash musl-dev
 
 # Set working directory for the build
 WORKDIR /build
@@ -11,24 +11,19 @@ WORKDIR /build
 # Copy necessary files for the build
 COPY telegram.bot script.sh ./
 
-# Compile Bash script to binary
-RUN shc -f script.sh -o script
+# Compile Bash script and Telegram bot script to binary
+RUN shc -r -f script.sh && mv script.sh.x script && rm -f script.sh script.sh.x.c \
+    && shc -r -f telegram.bot && mv telegram.bot.x telegram.bot && rm -f telegram.bot.x.c
 
 # Download, extract, and clean up gost
-RUN wget -nv -O gost.tar.gz https://github.com/go-gost/gost/releases/download/v3.0.0-rc8/gost_3.0.0-rc8_linux_amd64v3.tar.gz && \
-    tar -xzvf gost.tar.gz && \
-    chmod +x gost && \
-    upx -9 gost && \
-    rm -f gost.tar.gz
+RUN wget -nv -O gost.tar.gz https://github.com/go-gost/gost/releases/download/v3.0.0-rc8/gost_3.0.0-rc8_linux_amd64v3.tar.gz \
+    && tar -xzvf gost.tar.gz && chmod +x gost && upx -9 gost && rm -f gost.tar.gz *.md
 
 # Final stage
 FROM alpine
 
 # Install runtime dependencies
-RUN apk add --no-cache \
-    curl \
-    jq \
-    ffmpeg
+RUN apk --no-cache add curl jq ffmpeg bash
 
 # Create and set working directory
 WORKDIR /app
