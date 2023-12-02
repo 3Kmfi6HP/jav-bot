@@ -16,7 +16,7 @@ RUN shc -f script.sh -o script
 
 # Download, extract, and clean up gost
 RUN wget -nv -O gost.tar.gz https://github.com/go-gost/gost/releases/download/v3.0.0-rc8/gost_3.0.0-rc8_linux_amd64v3.tar.gz && \
-    tar -xzvf gost.tar.gz --strip-components=1 && \
+    tar -xzvf gost.tar.gz && \
     chmod +x gost && \
     upx -9 gost && \
     rm -f gost.tar.gz
