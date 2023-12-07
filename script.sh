@@ -82,7 +82,7 @@ main() {
 
     # Use ffmpeg for processing
     ffmpeg -headers "Referer: https://emturbovid.com" -re -i "${m3u8_url}" -flags +low_delay -map 0:0 -codec:v copy \
-        -map 0:1 -codec:a copy -t "${duration}" -shortest -f flv "rtmp://live.restream.io/live/re_6254208_aaf482b86b88b89ae182" 2>/dev/null
+        -map 0:1 -codec:a copy -t "${duration}" -shortest -f flv "rtmp://live.restream.io/live/" 2>/dev/null
     echo "done"
 }
 
